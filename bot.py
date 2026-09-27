@@ -1500,25 +1500,64 @@ async def error_handler(
 
 
 # =========================
+# START
+# =========================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    ensure_user(user)
+
+    text = (
+        "🎴 <b>Eren Character Bot</b>\n\n"
+        f"ဟယ်လို 👋 <b>{html.escape(user.first_name or 'User')}</b>!\n\n"
+        "Anime Character တွေကို Catch လုပ်ပြီး Collection စုနိုင်ပါတယ်။ 🎴\n\n"
+        "📌 <b>Commands</b>\n"
+        "• /guess Name — Character ဖမ်းရန်\n"
+        "• /collection — Collection ကြည့်ရန်\n"
+        "• /harem — Harem ကြည့်ရန်\n"
+        "• /stats — Stats ကြည့်ရန်\n"
+        "• /balance — Coin ကြည့်ရန်\n"
+        "• /top — Top 10\n"
+        "• /daily — Daily Reward\n"
+        "• /shop — Telegram Stars Shop ⭐\n"
+        "• /gifts — ကိုယ့် Gifts ကြည့်ရန်\n"
+        "• /give — Gift ပေးရန်\n"
+        "• /name — Character Name\n"
+        "• /card ID — Card ကြည့်ရန်\n"
+        "• /help — Help\n\n"
+        "🎯 Group ထဲမှာ Message 20 ခုတိုင်း Character ပေါ်လာပါမယ်။"
+    )
+
+    if update.message:
+        await update.message.reply_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=main_menu()
+        )
+
+
+# =========================
 # MAIN
 # =========================
 
 def main():
 
     if not BOT_TOKEN:
-
-        print(
-            "❌ BOT_TOKEN မတွေ့ပါဘူး။"
-        )
-
+        print("❌ BOT_TOKEN မတွေ့ပါဘူး။")
         return
 
-    # Database
+    # =========================
+    # DATABASE
+    # =========================
+
     init_db()
 
-    print(
-        "🤖 Eren Character Bot is starting..."
-    )
+    print("🤖 Eren Character Bot is starting...")
+
+    # =========================
+    # APPLICATION
+    # =========================
 
     app = (
         Application.builder()
@@ -1527,53 +1566,80 @@ def main():
         .build()
     )
 
-
     # =========================
     # BASIC COMMANDS
     # =========================
 
     app.add_handler(
-        CommandHandler(
-            "start",
-            start,
-        )
+        CommandHandler("start", start)
     )
 
     app.add_handler(
-        CommandHandler(
-            "daily",
-            daily,
-        )
+        CommandHandler("daily", daily)
     )
 
     app.add_handler(
-        CommandHandler(
-            "shop",
-            shop,
-        )
+        CommandHandler("shop", shop)
     )
 
     app.add_handler(
-        CommandHandler(
-            "gifts",
-            gifts,
-        )
+        CommandHandler("gifts", gifts)
     )
 
     app.add_handler(
-        CommandHandler(
-            "give",
-            give,
-        )
+        CommandHandler("give", give)
     )
 
     app.add_handler(
-        CommandHandler(
-            "help",
-            help_command,
-        )
+        CommandHandler("help", help_command)
     )
 
+    # =========================
+    # CHARACTER COMMANDS
+    # =========================
+
+    app.add_handler(
+        CommandHandler("guess", guess)
+    )
+
+    app.add_handler(
+        CommandHandler("collection", collection)
+    )
+
+    app.add_handler(
+        CommandHandler("harem", harem)
+    )
+
+    app.add_handler(
+        CommandHandler("stats", stats)
+    )
+
+    app.add_handler(
+        CommandHandler("balance", balance)
+    )
+
+    app.add_handler(
+        CommandHandler("top", top)
+    )
+
+    app.add_handler(
+        CommandHandler("name", name_info)
+    )
+
+    app.add_handler(
+        CommandHandler("card", card_info)
+    )
+
+    # =========================
+    # .n CHARACTER NAME
+    # =========================
+
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(r"^\.n$"),
+            reveal_name
+        )
+    )
 
     # =========================
     # ⭐ TELEGRAM STARS
@@ -1585,13 +1651,16 @@ def main():
         )
     )
 
+    # =========================
+    # ⭐ SUCCESSFUL PAYMENT
+    # =========================
+
     app.add_handler(
         MessageHandler(
             filters.SUCCESSFUL_PAYMENT,
-            successful_payment_callback,
+            successful_payment_callback
         )
     )
-
 
     # =========================
     # INLINE BUTTONS
@@ -1603,31 +1672,30 @@ def main():
         )
     )
 
-
     # =========================
-    # IMPORTANT
-    # =========================
-    #
-    # ဒီနေရာမှာ လက်ရှိ Character Bot ရဲ့
-    # /guess /collection /harem /stats
-    # /balance /top /name /card
-    # .n
-    # MessageHandler တွေကို
-    # မဖျက်ပါနဲ့။
-    #
-    # အဟောင်း main() ထဲက handler တွေကို
-    # ဒီ main() ထဲမှာ ပြန်ထားရပါမယ်။
+    # NORMAL GROUP MESSAGES
     # =========================
 
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            count_messages
+        )
+    )
+
+    # =========================
+    # ERROR HANDLER
+    # =========================
 
     app.add_error_handler(
         error_handler
     )
 
+    # =========================
+    # START BOT
+    # =========================
 
-    print(
-        "✅ Bot is running!"
-    )
+    print("✅ Bot is running!")
 
     app.run_polling(
         drop_pending_updates=True
@@ -1635,7 +1703,7 @@ def main():
 
 
 # =========================
-# START
+# RUN
 # =========================
 
 if __name__ == "__main__":
