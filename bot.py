@@ -11,7 +11,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-BOT_TOKEN = os.getenv("8889628848:AAFrUVGXPYMXTiF0RZ1Wjkdxp4rYKyOKw_M")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_FILE = "character.db"
 
 
