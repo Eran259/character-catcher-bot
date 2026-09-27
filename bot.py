@@ -1,33 +1,75 @@
 import os
 import sqlite3
 import random
+import html
 import requests
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    BotCommand,
+)
+
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
     MessageHandler,
+    PreCheckoutQueryHandler,
     filters,
 )
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DB_FILE = "character.db"
 
+DB_FILE = "character.db"
 MESSAGE_LIMIT = 20
+
+
+# =========================
+# TELEGRAM STARS SHOP
+# =========================
+
+SHOP_ITEMS = {
+    "small": {
+        "name": "🎁 Small Gift",
+        "stars": 10,
+    },
+
+    "rare": {
+        "name": "💎 Rare Gift",
+        "stars": 30,
+    },
+
+    "legendary": {
+        "name": "👑 Legendary Gift",
+        "stars": 75,
+    },
+
+    "ticket": {
+        "name": "🎟️ Card Ticket",
+        "stars": 100,
+    },
+}
 
 
 # =========================
 # DATABASE
 # =========================
 
+def get_db():
+    con = sqlite3.connect(DB_FILE)
+    con.row_factory = sqlite3.Row
+    return con
+
+
 def init_db():
 
-    con = sqlite3.connect(DB_FILE)
+    con = get_db()
     cur = con.cursor()
 
+    # USERS
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -38,10 +80,12 @@ def init_db():
         )
     """)
 
+    # COLLECTION
     cur.execute("""
         CREATE TABLE IF NOT EXISTS collection (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
+            card_id INTEGER,
             character_id INTEGER,
             name TEXT,
             series TEXT,
@@ -51,9 +95,20 @@ def init_db():
         )
     """)
 
+    # COLLECTION MIGRATION
+    cur.execute("PRAGMA table_info(collection)")
+    columns = [row["name"] for row in cur.fetchall()]
+
+    if "card_id" not in columns:
+        cur.execute(
+            "ALTER TABLE collection ADD COLUMN card_id INTEGER"
+        )
+
+    # ACTIVE CARDS
     cur.execute("""
         CREATE TABLE IF NOT EXISTS active_cards (
             chat_id INTEGER PRIMARY KEY,
+            card_id INTEGER,
             character_id INTEGER,
             name TEXT,
             series TEXT,
@@ -63,10 +118,69 @@ def init_db():
         )
     """)
 
+    # ACTIVE CARDS MIGRATION
+    cur.execute("PRAGMA table_info(active_cards)")
+    columns = [row["name"] for row in cur.fetchall()]
+
+    if "card_id" not in columns:
+        cur.execute(
+            "ALTER TABLE active_cards ADD COLUMN card_id INTEGER"
+        )
+
+    # GROUP STATS
     cur.execute("""
         CREATE TABLE IF NOT EXISTS group_stats (
             chat_id INTEGER PRIMARY KEY,
             messages INTEGER DEFAULT 0
+        )
+    """)
+
+    # =========================
+    # GIFTS
+    # =========================
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS gifts (
+            user_id INTEGER,
+            item_key TEXT,
+            item_name TEXT,
+            quantity INTEGER DEFAULT 0,
+            PRIMARY KEY (user_id, item_key)
+        )
+    """)
+
+    # =========================
+    # SHOP PURCHASES
+    # =========================
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS shop_purchases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            item_key TEXT,
+            item_name TEXT,
+            stars INTEGER,
+            quantity INTEGER DEFAULT 1,
+            telegram_payment_charge_id TEXT,
+            provider_payment_charge_id TEXT,
+            purchased_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # =========================
+    # STAR PAYMENTS
+    # =========================
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS star_payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            payload TEXT,
+            item_key TEXT,
+            stars INTEGER,
+            telegram_payment_charge_id TEXT,
+            provider_payment_charge_id TEXT,
+            paid_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
@@ -75,155 +189,76 @@ def init_db():
 
 
 # =========================
-# CHARACTER API
+# USER
 # =========================
 
-def get_character():
+def ensure_user(user):
 
-    try:
+    if not user:
+        return
 
-        url = "https://graphql.anilist.co"
-
-        query = """
-        query {
-            Page(page: 1, perPage: 50) {
-                characters(sort: FAVOURITES_DESC) {
-                    id
-                    name {
-                        full
-                    }
-                    image {
-                        large
-                    }
-                    media {
-                        nodes {
-                            title {
-                                romaji
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        """
-
-        response = requests.post(
-            url,
-            json={"query": query},
-            timeout=20
-        )
-
-        print("Character API status:", response.status_code)
-
-        if response.status_code != 200:
-            print("Character API error:", response.text)
-            return None
-
-        data = response.json()
-
-        characters = (
-            data.get("data", {})
-            .get("Page", {})
-            .get("characters", [])
-        )
-
-        if not characters:
-            return None
-
-        character = random.choice(characters)
-
-        name = character.get("name", {}).get("full")
-        image_url = character.get("image", {}).get("large")
-
-        if not name or not image_url:
-            return None
-
-        series = "Unknown Anime"
-
-        media = character.get("media", {}).get("nodes", [])
-
-        if media:
-
-            title = media[0].get("title", {})
-
-            series = (
-                title.get("romaji")
-                or "Unknown Anime"
-            )
-
-        return {
-            "id": character["id"],
-            "name": name,
-            "series": series,
-            "image_url": image_url
-        }
-
-    except Exception as e:
-
-        print("Character API error:", e)
-
-        return None
-
-
-# =========================
-# RARITY
-# =========================
-
-def random_rarity():
-
-    chance = random.randint(1, 100)
-
-    if chance <= 50:
-        return "🟢 Common", 10
-
-    elif chance <= 80:
-        return "🔵 Rare", 25
-
-    elif chance <= 95:
-        return "🟣 Epic", 50
-
-    elif chance <= 99:
-        return "🟠 Legendary", 100
-
-    else:
-        return "🔴 Mythic", 250
-
-
-# =========================
-# REGISTER USER
-# =========================
-
-def register_user(user):
-
-    con = sqlite3.connect(DB_FILE)
+    con = get_db()
     cur = con.cursor()
 
-    cur.execute("""
+    cur.execute(
+        """
         INSERT OR IGNORE INTO users
-        (
-            user_id,
-            username,
-            coins,
-            messages,
-            caught
-        )
+        (user_id, username, coins, messages, caught)
         VALUES (?, ?, 100, 0, 0)
-    """, (
-        user.id,
-        user.username or user.first_name
-    ))
+        """,
+        (
+            user.id,
+            user.username or "",
+        ),
+    )
 
-    cur.execute("""
+    cur.execute(
+        """
         UPDATE users
         SET username = ?
         WHERE user_id = ?
-    """, (
-        user.username or user.first_name,
-        user.id
-    ))
+        """,
+        (
+            user.username or "",
+            user.id,
+        ),
+    )
 
     con.commit()
     con.close()
+
+
+# =========================
+# RANDOM CARD ID
+# =========================
+
+def generate_card_id():
+
+    con = get_db()
+    cur = con.cursor()
+
+    while True:
+
+        card_id = random.randint(1000, 9999)
+
+        cur.execute(
+            "SELECT 1 FROM active_cards WHERE card_id = ?",
+            (card_id,),
+        )
+
+        if cur.fetchone():
+            continue
+
+        cur.execute(
+            "SELECT 1 FROM collection WHERE card_id = ?",
+            (card_id,),
+        )
+
+        if cur.fetchone():
+            continue
+
+        con.close()
+        return card_id
 
 
 # =========================
@@ -232,17 +267,19 @@ def register_user(user):
 
 def main_menu():
 
-    buttons = [
+    keyboard = [
+
         [
             InlineKeyboardButton(
-                "🎒 Collection",
+                "📚 Collection",
                 callback_data="collection"
             ),
             InlineKeyboardButton(
-                "👤 Stats",
+                "📊 Stats",
                 callback_data="stats"
-            )
+            ),
         ],
+
         [
             InlineKeyboardButton(
                 "💰 Balance",
@@ -251,620 +288,456 @@ def main_menu():
             InlineKeyboardButton(
                 "🏆 Top 10",
                 callback_data="top"
-            )
+            ),
         ],
+
         [
             InlineKeyboardButton(
-                "📖 Commands",
-                callback_data="commands"
-            )
-        ]
+                "🎁 Daily",
+                callback_data="daily"
+            ),
+            InlineKeyboardButton(
+                "🛒 Shop ⭐",
+                callback_data="shop"
+            ),
+        ],
+
+        [
+            InlineKeyboardButton(
+                "🎁 Gifts",
+                callback_data="gifts"
+            ),
+            InlineKeyboardButton(
+                "❓ Help",
+                callback_data="help"
+            ),
+        ],
     ]
 
-    return InlineKeyboardMarkup(buttons)
+    return InlineKeyboardMarkup(keyboard)
 
 
 # =========================
-# START
+# SHOP KEYBOARD
 # =========================
 
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+def shop_keyboard():
 
-    if not update.message:
-        return
+    keyboard = []
 
-    user = update.effective_user
+    for key, item in SHOP_ITEMS.items():
 
-    register_user(user)
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{item['name']} — ⭐ {item['stars']}",
+                callback_data=f"buy:{key}",
+            )
+        ])
 
-    username = (
-        f"@{user.username}"
-        if user.username
-        else "No Username"
-    )
+    keyboard.append([
+        InlineKeyboardButton(
+            "🎁 My Gifts",
+            callback_data="gifts",
+        )
+    ])
 
-    text = (
-        "🎮 <b>Character Catcher Bot မှ ကြိုဆိုပါတယ်!</b>\n\n"
+    keyboard.append([
+        InlineKeyboardButton(
+            "⬅️ Back",
+            callback_data="start",
+        )
+    ])
 
-        "👤 <b>User Info:</b>\n"
-        f"📛 Name: {user.full_name}\n"
-        f"🔗 Username: {username}\n"
-        f"🆔 Chat ID: {user.id}\n\n"
+    return InlineKeyboardMarkup(keyboard)
 
-        "🎴 <b>Card တွေ ကောက်ယူနည်း:</b>\n"
-        "• Group ထဲမှာ စာတွေ ရေးပါ\n"
-        "• စာ 20 ကြောင်းပြည့်ရင် Card ကျပါမယ်\n"
-        "• Card ကို Reply လုပ်ပြီး <code>.n</code> ရိုက်ပါ\n"
-        "• Character Name ကို Copy လုပ်ပါ\n"
-        "• /guess &lt;name&gt; နဲ့ Card ဖမ်းပါ\n"
-        "• မှန်ရင် Card နဲ့ Coins ရပါမယ်\n\n"
+# =========================
+# SHOP COMMAND
+# =========================
 
-        "💬 <b>Group ထဲမှာ စာရေးပြီး Character ဖမ်းပါ!</b>"
-    )
+async def shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    ensure_user(update.effective_user)
+
+    text = """
+🛒 <b>Telegram Stars Shop</b>
+
+⭐ Telegram Stars နဲ့ Item ဝယ်နိုင်ပါတယ်။
+
+🎁 Small Gift — ⭐ 10
+💎 Rare Gift — ⭐ 30
+👑 Legendary Gift — ⭐ 75
+🎟️ Card Ticket — ⭐ 100
+
+အောက်က Button ကိုနှိပ်ပြီး ဝယ်ယူပါ။
+"""
 
     await update.message.reply_text(
         text,
         parse_mode="HTML",
-        reply_markup=main_menu()
+        reply_markup=shop_keyboard(),
     )
 
 
 # =========================
-# GROUP MESSAGE COUNTER
+# SEND TELEGRAM STARS INVOICE
 # =========================
 
-async def count_messages(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+async def send_shop_invoice(
+    query,
+    context,
+    item_key,
 ):
 
-    if not update.message:
-        return
+    item = SHOP_ITEMS.get(item_key)
 
-    chat = update.effective_chat
-    user = update.effective_user
+    if not item:
 
-    if not chat:
-        return
-
-    if chat.type not in ("group", "supergroup"):
-        return
-
-    if not user:
-        return
-
-    if user.is_bot:
-        return
-
-    register_user(user)
-
-    chat_id = chat.id
-
-    con = sqlite3.connect(DB_FILE)
-    cur = con.cursor()
-
-    # User message count
-    cur.execute("""
-        UPDATE users
-        SET messages = messages + 1
-        WHERE user_id = ?
-    """, (user.id,))
-
-    # Group message counter
-    cur.execute("""
-        INSERT OR IGNORE INTO group_stats
-        (chat_id, messages)
-        VALUES (?, 0)
-    """, (chat_id,))
-
-    cur.execute("""
-        UPDATE group_stats
-        SET messages = messages + 1
-        WHERE chat_id = ?
-    """, (chat_id,))
-
-    cur.execute("""
-        SELECT messages
-        FROM group_stats
-        WHERE chat_id = ?
-    """, (chat_id,))
-
-    row = cur.fetchone()
-
-    con.commit()
-    con.close()
-
-    if not row:
-        return
-
-    total_messages = row[0]
-
-    # Every 20 group messages
-    if total_messages % MESSAGE_LIMIT != 0:
-        return
-
-    # Don't spawn if another card exists
-    con = sqlite3.connect(DB_FILE)
-    cur = con.cursor()
-
-    cur.execute("""
-        SELECT character_id
-        FROM active_cards
-        WHERE chat_id = ?
-    """, (chat_id,))
-
-    existing = cur.fetchone()
-
-    con.close()
-
-    if existing:
-        return
-
-    # Get Character
-    character = get_character()
-
-    if not character:
-
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="❌ Character API မရနိုင်သေးပါဘူး။"
+        await query.answer(
+            "❌ Item မတွေ့ပါဘူး။",
+            show_alert=True,
         )
 
         return
 
-    rarity, reward = random_rarity()
+    user_id = query.from_user.id
 
-    con = sqlite3.connect(DB_FILE)
-    cur = con.cursor()
+    payload = f"shop:{item_key}:{user_id}"
 
-    cur.execute("""
-        INSERT OR REPLACE INTO active_cards
-        (
-            chat_id,
-            character_id,
-            name,
-            series,
-            image_url,
-            rarity,
-            reward
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (
-        chat_id,
-        character["id"],
-        character["name"],
-        character["series"],
-        character["image_url"],
-        rarity,
-        reward
-    ))
+    await context.bot.send_invoice(
 
-    con.commit()
-    con.close()
+        chat_id=query.message.chat_id,
 
-    text = (
-        "🎴 <b>A NEW CHARACTER HAS APPEARED!</b>\n\n"
-        f"💎 Rarity: {rarity}\n"
-        f"📺 Anime: <b>{character['series']}</b>\n\n"
-        "❓ <b>Who is this character?</b>\n\n"
-        "💡 Name သိချင်ရင် ဒီ Card ကို Reply လုပ်ပြီး "
-        "<code>.n</code> ရိုက်ပါ!\n\n"
-        "🎯 Guess:\n"
-        "<code>/guess &lt;name&gt;</code>"
+        title=item["name"],
+
+        description=(
+            f"{item['name']} ဝယ်ယူရန် "
+            f"{item['stars']} Telegram Stars လိုအပ်ပါတယ်။"
+        ),
+
+        payload=payload,
+
+        currency="XTR",
+
+        prices=[
+            {
+                "label": item["name"],
+                "amount": item["stars"],
+            }
+        ],
+
+        # Telegram Stars အတွက် provider token မလိုပါ
+        provider_token="",
     )
 
-    # IMPORTANT:
-    # Send as a NEW message.
-    # Do NOT reply to the user's message.
+    await query.answer()
+
+
+# =========================
+# PRE-CHECKOUT
+# =========================
+
+async def precheckout_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    query = update.pre_checkout_query
+
+    if not query:
+        return
+
+    payload = query.invoice_payload
+
+    # Only our shop payment
+    if not payload.startswith("shop:"):
+
+        await query.answer(
+            ok=False,
+            error_message="❌ Invalid payment.",
+        )
+
+        return
+
+    parts = payload.split(":")
+
+    if len(parts) != 3:
+
+        await query.answer(
+            ok=False,
+            error_message="❌ Invalid shop item.",
+        )
+
+        return
+
+    item_key = parts[1]
+
+    try:
+        payload_user_id = int(parts[2])
+    except ValueError:
+
+        await query.answer(
+            ok=False,
+            error_message="❌ Invalid user.",
+        )
+
+        return
+
+    item = SHOP_ITEMS.get(item_key)
+
+    if not item:
+
+        await query.answer(
+            ok=False,
+            error_message="❌ Item မတွေ့ပါဘူး။",
+        )
+
+        return
+
+    # Check user
+    if query.from_user.id != payload_user_id:
+
+        await query.answer(
+            ok=False,
+            error_message="❌ Payment user မကိုက်ပါ။",
+        )
+
+        return
+
+    # Check currency
+    if query.currency != "XTR":
+
+        await query.answer(
+            ok=False,
+            error_message="❌ Telegram Stars payment only.",
+        )
+
+        return
+
+    # Check amount
+    if query.total_amount != item["stars"]:
+
+        await query.answer(
+            ok=False,
+            error_message="❌ Payment amount မမှန်ပါ။",
+        )
+
+        return
+
+    # Everything OK
+    await query.answer(ok=True)
+
+
+# =========================
+# SUCCESSFUL PAYMENT
+# =========================
+
+async def successful_payment_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    payment = update.message.successful_payment
+
+    if not payment:
+        return
+
+    payload = payment.invoice_payload
+
+    if not payload.startswith("shop:"):
+        return
+
+    parts = payload.split(":")
+
+    if len(parts) != 3:
+        return
+
+    item_key = parts[1]
+
+    try:
+        payload_user_id = int(parts[2])
+    except ValueError:
+        return
+
+    user_id = update.effective_user.id
+
+    # Payload user must match payer
+    if payload_user_id != user_id:
+        return
+
+    item = SHOP_ITEMS.get(item_key)
+
+    if not item:
+        return
+
+    # Verify Telegram Stars
+    if payment.currency != "XTR":
+        return
+
+    if payment.total_amount != item["stars"]:
+        return
+
+    con = get_db()
+    cur = con.cursor()
+
     try:
 
-        await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=character["image_url"],
-            caption=text,
-            parse_mode="HTML"
+        # Prevent duplicate processing
+        cur.execute(
+            """
+            SELECT id
+            FROM star_payments
+            WHERE telegram_payment_charge_id = ?
+            """,
+            (
+                payment.telegram_payment_charge_id,
+            ),
         )
+
+        if cur.fetchone():
+
+            con.close()
+
+            await update.message.reply_text(
+                "ℹ️ ဒီ Payment ကို အရင် Process လုပ်ပြီးသားပါ။"
+            )
+
+            return
+
+        # Add item to Gifts
+        cur.execute(
+            """
+            INSERT INTO gifts
+            (
+                user_id,
+                item_key,
+                item_name,
+                quantity
+            )
+            VALUES (?, ?, ?, 1)
+
+            ON CONFLICT(user_id, item_key)
+            DO UPDATE SET
+                quantity = quantity + 1
+            """,
+            (
+                user_id,
+                item_key,
+                item["name"],
+            ),
+        )
+
+        # Save payment
+        cur.execute(
+            """
+            INSERT INTO star_payments
+            (
+                user_id,
+                payload,
+                item_key,
+                stars,
+                telegram_payment_charge_id,
+                provider_payment_charge_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                payload,
+                item_key,
+                payment.total_amount,
+                payment.telegram_payment_charge_id,
+                payment.provider_payment_charge_id,
+            ),
+        )
+
+        # Purchase history
+        cur.execute(
+            """
+            INSERT INTO shop_purchases
+            (
+                user_id,
+                item_key,
+                item_name,
+                stars,
+                quantity,
+                telegram_payment_charge_id,
+                provider_payment_charge_id
+            )
+            VALUES (?, ?, ?, ?, 1, ?, ?)
+            """,
+            (
+                user_id,
+                item_key,
+                item["name"],
+                payment.total_amount,
+                payment.telegram_payment_charge_id,
+                payment.provider_payment_charge_id,
+            ),
+        )
+
+        con.commit()
 
     except Exception as e:
 
-        print("Failed to send card:", e)
-
-        try:
-
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode="HTML"
-            )
-
-        except Exception as e2:
-
-            print(
-                "Failed to send card text:",
-                e2
-        )
-
-# =========================
-# GUESS
-# =========================
-
-async def guess(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if not update.message:
-        return
-
-    user = update.effective_user
-    chat = update.effective_chat
-
-    register_user(user)
-
-    if not context.args:
-        await update.message.reply_text(
-            "❓ Character Name ထည့်ပေးပါ။\n\n"
-            "ဥပမာ:\n"
-            "/guess Gojo Satoru"
-        )
-        return
-
-    guess_name = " ".join(context.args).strip().lower()
-
-    con = sqlite3.connect(DB_FILE)
-    cur = con.cursor()
-
-    cur.execute("""
-        SELECT character_id, name, series,
-               image_url, rarity, reward
-        FROM active_cards
-        WHERE chat_id = ?
-    """, (chat.id,))
-
-    card = cur.fetchone()
-
-    if not card:
+        con.rollback()
         con.close()
 
-        await update.message.reply_text(
-            "❌ လက်ရှိမှာ ဖမ်းစရာ Card မရှိသေးပါဘူး။"
+        print(
+            "Payment processing error:",
+            e,
         )
-        return
-
-    character_id, name, series, image_url, rarity, reward = card
-
-    real_name = name.lower()
-    first_name = name.split()[0].lower()
-
-    # Full name or first name
-    if (
-        guess_name != real_name
-        and guess_name != first_name
-    ):
-
-        con.close()
 
         await update.message.reply_text(
-            "❌ မမှန်သေးပါဘူး!\n"
-            "ဆက်ပြီး Guess လုပ်ကြည့်ပါ 🎴"
+            "❌ Payment process မှာ Error ဖြစ်သွားပါတယ်။"
         )
 
         return
 
-    # Save collection
-    cur.execute("""
-        INSERT INTO collection
-        (
-            user_id,
-            character_id,
-            name,
-            series,
-            image_url,
-            rarity,
-            coins
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (
-        user.id,
-        character_id,
-        name,
-        series,
-        image_url,
-        rarity,
-        reward
-    ))
+    con.close()
 
-    # Give coins
-    cur.execute("""
-        UPDATE users
-        SET coins = coins + ?,
-            caught = caught + 1
+    await update.message.reply_text(
+        f"""
+✅ <b>Payment Successful!</b>
+
+{item['name']}
+
+⭐ Paid: <b>{payment.total_amount} Stars</b>
+
+🎁 Item ကို Gifts Inventory ထဲ ထည့်ပြီးပါပြီ။
+
+📦 <code>/gifts</code>
+နဲ့ ကြည့်နိုင်ပါတယ်။
+""",
+        parse_mode="HTML",
+    )
+
+
+# =========================
+# GIFTS COMMAND
+# =========================
+
+async def gifts(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    ensure_user(update.effective_user)
+
+    user_id = update.effective_user.id
+
+    con = get_db()
+    cur = con.cursor()
+
+    cur.execute(
+        """
+        SELECT item_key, item_name, quantity
+        FROM gifts
         WHERE user_id = ?
-    """, (
-        reward,
-        user.id
-    ))
-
-    # Remove active card
-    cur.execute("""
-        DELETE FROM active_cards
-        WHERE chat_id = ?
-    """, (chat.id,))
-
-    con.commit()
-    con.close()
-
-    await update.message.reply_text(
-        "🎉 <b>CARD CAUGHT!</b>\n\n"
-        f"🎴 Character: <b>{name}</b>\n"
-        f"📺 Anime: <b>{series}</b>\n"
-        f"💎 Rarity: {rarity}\n"
-        f"💰 Reward: +{reward} Coins\n\n"
-        f"👤 <b>{user.first_name}</b> က Card ကို ဖမ်းလိုက်ပါပြီ!",
-        parse_mode="HTML"
+        AND quantity > 0
+        ORDER BY item_key
+        """,
+        (user_id,),
     )
-
-
-# =========================
-# .N - CARD NAME
-# =========================
-
-async def card_name(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if not update.message:
-        return
-
-    reply = update.message.reply_to_message
-
-    if not reply:
-        await update.message.reply_text(
-            "❗ Character Card message ကို Reply လုပ်ပြီး `.n` ရိုက်ပါ။"
-        )
-        return
-
-    chat = update.effective_chat
-
-    if not chat:
-        return
-
-    chat_id = chat.id
-
-    con = sqlite3.connect(DB_FILE)
-    cur = con.cursor()
-
-    cur.execute("""
-        SELECT name
-        FROM active_cards
-        WHERE chat_id = ?
-    """, (chat_id,))
-
-    row = cur.fetchone()
-
-    con.close()
-
-    if not row:
-        await update.message.reply_text(
-            "❌ ဒီ Card က မရှိတော့ပါဘူး။"
-        )
-        return
-
-    character_name = row[0]
-
-    await update.message.reply_text(
-        "🎴 <b>Character Name</b>\n\n"
-        f"<code>{character_name}</code>\n\n"
-        "👆 Name ကို Copy လုပ်ပြီး\n"
-        "<code>/guess " + character_name + "</code>\n"
-        "နဲ့ Card ဖမ်းနိုင်ပါတယ်။",
-        parse_mode="HTML"
-    )
-
-
-# =========================
-# COLLECTION
-# =========================
-
-async def collection(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    user = update.effective_user
-
-    register_user(user)
-
-    con = sqlite3.connect(DB_FILE)
-    cur = con.cursor()
-
-    cur.execute("""
-        SELECT name, series, rarity
-        FROM collection
-        WHERE user_id = ?
-        ORDER BY id DESC
-        LIMIT 20
-    """, (user.id,))
-
-    cards = cur.fetchall()
-
-    con.close()
-
-    if not cards:
-
-        await update.message.reply_text(
-            "🎒 <b>YOUR COLLECTION</b>\n\n"
-            "📭 Card မရှိသေးပါဘူး။\n"
-            "Group ထဲမှာ စာရေးပြီး Card ဖမ်းပါ 🎴",
-            parse_mode="HTML"
-        )
-
-        return
-
-    text = "🎒 <b>YOUR COLLECTION</b>\n\n"
-
-    for i, (name, series, rarity) in enumerate(cards, 1):
-
-        text += (
-            f"{i}. {rarity} <b>{name}</b>\n"
-            f"   📺 {series}\n\n"
-        )
-
-    await update.message.reply_text(
-        text,
-        parse_mode="HTML"
-    )
-
-
-# =========================
-# HAREM
-# =========================
-
-async def harem(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    user = update.effective_user
-
-    register_user(user)
-
-    con = sqlite3.connect(DB_FILE)
-    cur = con.cursor()
-
-    cur.execute("""
-        SELECT name, rarity
-        FROM collection
-        WHERE user_id = ?
-        ORDER BY id DESC
-    """, (user.id,))
-
-    cards = cur.fetchall()
-
-    con.close()
-
-    if not cards:
-
-        await update.message.reply_text(
-            "💖 <b>YOUR HAREM</b>\n\n"
-            "📭 Empty ဖြစ်နေပါသေးတယ် 😅",
-            parse_mode="HTML"
-        )
-
-        return
-
-    text = "💖 <b>YOUR HAREM</b>\n\n"
-
-    for i, (name, rarity) in enumerate(cards, 1):
-
-        text += (
-            f"{i}. {rarity} <b>{name}</b>\n"
-        )
-
-    await update.message.reply_text(
-        text,
-        parse_mode="HTML"
-    )
-
-
-# =========================
-# STATS
-# =========================
-
-async def stats(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    user = update.effective_user
-
-    register_user(user)
-
-    con = sqlite3.connect(DB_FILE)
-    cur = con.cursor()
-
-    cur.execute("""
-        SELECT coins, messages, caught
-        FROM users
-        WHERE user_id = ?
-    """, (user.id,))
-
-    row = cur.fetchone()
-
-    con.close()
-
-    if not row:
-        return
-
-    coins, messages, caught = row
-
-    await update.message.reply_text(
-        "👤 <b>YOUR STATS</b>\n\n"
-        f"📛 Name: <b>{user.full_name}</b>\n"
-        f"💰 Coins: <b>{coins}</b>\n"
-        f"💬 Messages: <b>{messages}</b>\n"
-        f"🎴 Cards Caught: <b>{caught}</b>",
-        parse_mode="HTML"
-    )
-
-
-# =========================
-# BALANCE
-# =========================
-
-async def balance(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    user = update.effective_user
-
-    register_user(user)
-
-    con = sqlite3.connect(DB_FILE)
-    cur = con.cursor()
-
-    cur.execute("""
-        SELECT coins
-        FROM users
-        WHERE user_id = ?
-    """, (user.id,))
-
-    row = cur.fetchone()
-
-    con.close()
-
-    coins = row[0] if row else 0
-
-    await update.message.reply_text(
-        "💰 <b>YOUR BALANCE</b>\n\n"
-        f"🪙 Coins: <b>{coins}</b>",
-        parse_mode="HTML"
-    )
-
-
-# =========================
-# TOP 10
-# =========================
-
-async def top(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    con = sqlite3.connect(DB_FILE)
-    cur = con.cursor()
-
-    cur.execute("""
-        SELECT username, coins, caught
-        FROM users
-        ORDER BY coins DESC
-        LIMIT 10
-    """)
 
     rows = cur.fetchall()
 
@@ -873,322 +746,757 @@ async def top(
     if not rows:
 
         await update.message.reply_text(
-            "🏆 Leaderboard မရှိသေးပါဘူး။"
+            """
+🎁 <b>My Gifts</b>
+
+လက်ရှိ Gift မရှိသေးပါဘူး။
+
+⭐ <code>/shop</code>
+ကနေ ဝယ်ယူနိုင်ပါတယ်။
+""",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🛒 Shop ⭐",
+                        callback_data="shop",
+                    )
+                ]
+            ]),
         )
 
         return
 
-    text = "🏆 <b>TOP 10 PLAYERS</b>\n\n"
+    lines = [
+        "🎁 <b>My Gifts</b>",
+        "",
+    ]
 
-    for i, (username, coins, caught) in enumerate(rows, 1):
+    for row in rows:
 
-        text += (
-            f"{i}. <b>{username or 'Unknown'}</b>\n"
-            f"   🪙 {coins} Coins | 🎴 {caught} Cards\n\n"
+        lines.append(
+            f"{row['item_name']} × "
+            f"<b>{row['quantity']}</b>"
         )
+
+    lines.extend([
+        "",
+        "🎁 Gift ပို့ရန်:",
+        "<code>/give @username small</code>",
+        "",
+        "သို့မဟုတ် User message ကို Reply လုပ်ပြီး:",
+        "<code>/give small</code>",
+    ])
 
     await update.message.reply_text(
-        text,
-        parse_mode="HTML"
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🛒 Shop ⭐",
+                    callback_data="shop",
+                )
+            ]
+        ]),
     )
 
 
 # =========================
-# CHARACTER NAME INFO
+# GIVE GIFT
 # =========================
 
-async def name_info(
+async def give(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
 
-    user = update.effective_user
+    sender = update.effective_user
 
-    if not context.args:
+    ensure_user(sender)
+
+    args = context.args
+
+    recipient_id = None
+    item_key = None
+
+    # -------------------------
+    # Reply mode
+    # /give small
+    # -------------------------
+
+    if update.message.reply_to_message:
+
+        replied_user = (
+            update.message.reply_to_message.from_user
+        )
+
+        if replied_user:
+
+            recipient_id = replied_user.id
+
+            if args:
+                item_key = args[0].lower()
+
+    # -------------------------
+    # Username mode
+    # /give @username small
+    # -------------------------
+
+    else:
+
+        if len(args) >= 2:
+
+            username = (
+                args[0]
+                .lstrip("@")
+                .lower()
+            )
+
+            item_key = args[1].lower()
+
+            con = get_db()
+            cur = con.cursor()
+
+            cur.execute(
+                """
+                SELECT user_id
+                FROM users
+                WHERE LOWER(username) = ?
+                LIMIT 1
+                """,
+                (username,),
+            )
+
+            row = cur.fetchone()
+
+            con.close()
+
+            if row:
+                recipient_id = row["user_id"]
+
+    # -------------------------
+    # Usage
+    # -------------------------
+
+    if not recipient_id or not item_key:
 
         await update.message.reply_text(
-            "❓ Character Name ထည့်ပေးပါ။\n\n"
-            "ဥပမာ:\n"
-            "/name Gojo"
+            """
+🎁 <b>Gift ပို့နည်း</b>
+
+User message ကို Reply လုပ်ပြီး:
+
+<code>/give small</code>
+
+သို့မဟုတ်:
+
+<code>/give @username small</code>
+
+Available:
+
+<code>small</code>
+<code>rare</code>
+<code>legendary</code>
+<code>ticket</code>
+""",
+            parse_mode="HTML",
         )
 
         return
 
-    search_name = " ".join(
-        context.args
-    ).strip().lower()
+    # -------------------------
+    # Cannot gift yourself
+    # -------------------------
 
-    con = sqlite3.connect(DB_FILE)
+    if recipient_id == sender.id:
+
+        await update.message.reply_text(
+            "❌ ကိုယ့်ကိုယ်ကို Gift ပို့လို့မရပါဘူး။"
+        )
+
+        return
+
+    # -------------------------
+    # Check item
+    # -------------------------
+
+    if item_key not in SHOP_ITEMS:
+
+        await update.message.reply_text(
+            "❌ ဒီ Gift အမျိုးအစား မရှိပါဘူး။"
+        )
+
+        return
+
+    item = SHOP_ITEMS[item_key]
+
+    con = get_db()
     cur = con.cursor()
-
-    cur.execute("""
-        SELECT name, series, image_url, rarity
-        FROM collection
-        WHERE user_id = ?
-        AND LOWER(name) LIKE ?
-        ORDER BY id DESC
-        LIMIT 1
-    """, (
-        user.id,
-        "%" + search_name + "%"
-    ))
-
-    row = cur.fetchone()
-
-    con.close()
-
-    if not row:
-
-        await update.message.reply_text(
-            "❌ ဒီ Character ကို Collection ထဲမှာ မတွေ့ပါဘူး။"
-        )
-
-        return
-
-    name, series, image_url, rarity = row
-
-    text = (
-        f"🎴 <b>{name}</b>\n\n"
-        f"📺 Anime: <b>{series}</b>\n"
-        f"💎 Rarity: {rarity}"
-    )
 
     try:
 
-        await update.message.reply_photo(
-            photo=image_url,
-            caption=text,
-            parse_mode="HTML"
+        cur.execute("BEGIN IMMEDIATE")
+
+        # Sender inventory
+        cur.execute(
+            """
+            SELECT quantity
+            FROM gifts
+            WHERE user_id = ?
+            AND item_key = ?
+            """,
+            (
+                sender.id,
+                item_key,
+            ),
+        )
+
+        sender_item = cur.fetchone()
+
+        if (
+            not sender_item
+            or sender_item["quantity"] <= 0
+        ):
+
+            con.rollback()
+            con.close()
+
+            await update.message.reply_text(
+                f"❌ သင့်မှာ {item['name']} မရှိပါဘူး။"
+            )
+
+            return
+
+        # Recipient exists?
+        cur.execute(
+            """
+            SELECT user_id
+            FROM users
+            WHERE user_id = ?
+            """,
+            (recipient_id,),
+        )
+
+        recipient = cur.fetchone()
+
+        if not recipient:
+
+            con.rollback()
+            con.close()
+
+            await update.message.reply_text(
+                "❌ ဒီ User က Bot ကို မသုံးဖူးသေးပါဘူး။"
+            )
+
+            return
+
+        # Remove sender gift
+        cur.execute(
+            """
+            UPDATE gifts
+            SET quantity = quantity - 1
+            WHERE user_id = ?
+            AND item_key = ?
+            AND quantity > 0
+            """,
+            (
+                sender.id,
+                item_key,
+            ),
+        )
+
+        # Add recipient gift
+        cur.execute(
+            """
+            INSERT INTO gifts
+            (
+                user_id,
+                item_key,
+                item_name,
+                quantity
+            )
+            VALUES (?, ?, ?, 1)
+
+            ON CONFLICT(user_id, item_key)
+            DO UPDATE SET
+                quantity = quantity + 1
+            """,
+            (
+                recipient_id,
+                item_key,
+                item["name"],
+            ),
+        )
+
+        con.commit()
+
+    except Exception as e:
+
+        con.rollback()
+        con.close()
+
+        print(
+            "Gift transfer error:",
+            e,
+        )
+
+        await update.message.reply_text(
+            "❌ Gift ပို့တဲ့အချိန် Error ဖြစ်သွားပါတယ်။"
+        )
+
+        return
+
+    con.close()
+
+    await update.message.reply_text(
+        f"""
+🎁 <b>Gift Sent!</b>
+
+{item['name']}
+
+✅ Gift 1 ခု ပို့ပြီးပါပြီ။
+""",
+        parse_mode="HTML",
+    )
+
+    # Notify recipient
+    try:
+
+        await context.bot.send_message(
+            chat_id=recipient_id,
+            text=f"""
+🎁 <b>You received a Gift!</b>
+
+{item['name']}
+
+👤 From:
+{html.escape(sender.first_name or "User")}
+
+📦 <code>/gifts</code>
+""",
+            parse_mode="HTML",
         )
 
     except Exception:
+        pass
 
-        await update.message.reply_text(
-            text,
-            parse_mode="HTML"
+
+# =========================
+# SHOP CALLBACK
+# =========================
+
+async def shop_button_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    query = update.callback_query
+
+    data = query.data
+
+    if data == "shop":
+
+        await query.answer()
+
+        await query.edit_message_text(
+            """
+🛒 <b>Telegram Stars Shop</b>
+
+⭐ Item ရွေးပြီး Telegram Stars နဲ့ ဝယ်ပါ။
+""",
+            parse_mode="HTML",
+            reply_markup=shop_keyboard(),
         )
 
+        return
+
+    if data.startswith("buy:"):
+
+        item_key = data.split(":", 1)[1]
+
+        await send_shop_invoice(
+            query,
+            context,
+            item_key,
+        )
+
+        return
+
 
 # =========================
-# BUTTON HANDLER
+# GIFTS CALLBACK
 # =========================
 
-async def button_handler(
+async def gifts_button_handler(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
 
     query = update.callback_query
 
     await query.answer()
 
-    user = query.from_user
+    user_id = query.from_user.id
 
-    register_user(user)
+    con = get_db()
+    cur = con.cursor()
 
-    if query.data == "collection":
+    cur.execute(
+        """
+        SELECT item_name, quantity
+        FROM gifts
+        WHERE user_id = ?
+        AND quantity > 0
+        ORDER BY item_key
+        """,
+        (user_id,),
+    )
 
-        con = sqlite3.connect(DB_FILE)
-        cur = con.cursor()
+    rows = cur.fetchall()
 
-        cur.execute("""
-            SELECT name, series, rarity
-            FROM collection
-            WHERE user_id = ?
-            ORDER BY id DESC
-            LIMIT 20
-        """, (user.id,))
+    con.close()
 
-        cards = cur.fetchall()
+    if not rows:
 
-        con.close()
+        text = """
+🎁 <b>My Gifts</b>
 
-        if not cards:
+Gift မရှိသေးပါဘူး။
+"""
 
-            text = (
-                "🎒 <b>YOUR COLLECTION</b>\n\n"
-                "📭 Card မရှိသေးပါဘူး။"
+    else:
+
+        lines = [
+            "🎁 <b>My Gifts</b>",
+            "",
+        ]
+
+        for row in rows:
+
+            lines.append(
+                f"{row['item_name']} × "
+                f"<b>{row['quantity']}</b>"
             )
 
-        else:
+        text = "\n".join(lines)
 
-            text = "🎒 <b>YOUR COLLECTION</b>\n\n"
-
-            for i, (name, series, rarity) in enumerate(cards, 1):
-
-                text += (
-                    f"{i}. {rarity} <b>{name}</b>\n"
-                    f"   📺 {series}\n\n"
+    await query.edit_message_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🛒 Shop ⭐",
+                    callback_data="shop",
                 )
-
-        await query.edit_message_text(
-            text,
-            parse_mode="HTML"
-        )
-
-
-    elif query.data == "stats":
-
-        con = sqlite3.connect(DB_FILE)
-        cur = con.cursor()
-
-        cur.execute("""
-            SELECT coins, messages, caught
-            FROM users
-            WHERE user_id = ?
-        """, (user.id,))
-
-        row = cur.fetchone()
-
-        con.close()
-
-        if row:
-
-            coins, messages, caught = row
-
-            text = (
-                "👤 <b>YOUR STATS</b>\n\n"
-                f"💰 Coins: <b>{coins}</b>\n"
-                f"💬 Messages: <b>{messages}</b>\n"
-                f"🎴 Cards Caught: <b>{caught}</b>"
-            )
-
-        else:
-
-            text = "❌ User data မတွေ့ပါဘူး။"
-
-        await query.edit_message_text(
-            text,
-            parse_mode="HTML"
-        )
-
-
-    elif query.data == "balance":
-
-        con = sqlite3.connect(DB_FILE)
-        cur = con.cursor()
-
-        cur.execute("""
-            SELECT coins
-            FROM users
-            WHERE user_id = ?
-        """, (user.id,))
-
-        row = cur.fetchone()
-
-        con.close()
-
-        coins = row[0] if row else 0
-
-        await query.edit_message_text(
-            "💰 <b>YOUR BALANCE</b>\n\n"
-            f"🪙 Coins: <b>{coins}</b>",
-            parse_mode="HTML"
-        )
-
-
-    elif query.data == "top":
-
-        con = sqlite3.connect(DB_FILE)
-        cur = con.cursor()
-
-        cur.execute("""
-            SELECT username, coins, caught
-            FROM users
-            ORDER BY coins DESC
-            LIMIT 10
-        """)
-
-        rows = cur.fetchall()
-
-        con.close()
-
-        text = "🏆 <b>TOP 10 PLAYERS</b>\n\n"
-
-        for i, (username, coins, caught) in enumerate(rows, 1):
-
-            text += (
-                f"{i}. <b>{username or 'Unknown'}</b>\n"
-                f"   🪙 {coins} | 🎴 {caught}\n\n"
-            )
-
-        await query.edit_message_text(
-            text,
-            parse_mode="HTML"
-        )
-
-
-    elif query.data == "commands":
-
-        text = (
-            "📖 <b>COMMANDS</b>\n\n"
-            "/start — 🎮 Start Bot\n"
-            "/guess &lt;name&gt; — 🎯 Catch Card\n"
-            "/name &lt;name&gt; — 🔎 Character Info\n"
-            "/collection — 🎴 My Collection\n"
-            "/harem — 💖 My Harem\n"
-            "/stats — 👤 My Stats\n"
-            "/balance — 💰 Coins\n"
-            "/top — 🏆 Top 10\n\n"
-            "💡 Card Name သိချင်ရင်\n"
-            "Card ကို Reply → <code>.n</code>"
-        )
-
-        await query.edit_message_text(
-            text,
-            parse_mode="HTML"
-        )
-
+            ]
+        ]),
+    )
 
 # =========================
-# TELEGRAM MENU
+# TELEGRAM MENU BUTTON
 # =========================
 
 async def post_init(application):
 
-    await application.bot.set_my_commands([
+    commands = [
 
-        BotCommand(
-            "start",
-            "🎮 Start Bot"
-        ),
+        BotCommand("start", "🎴 Start"),
+        BotCommand("daily", "🎁 Daily Reward"),
 
-        BotCommand(
-            "guess",
-            "🎯 Catch a Card"
-        ),
+        BotCommand("guess", "🎯 Guess Character"),
+        BotCommand("name", "🔎 Character Name"),
+        BotCommand("card", "🆔 Card Info"),
 
-        BotCommand(
-            "collection",
-            "🎴 My Collection"
-        ),
+        BotCommand("collection", "📚 Collection"),
+        BotCommand("harem", "💖 Harem"),
 
-        BotCommand(
-            "harem",
-            "💖 My Harem"
-        ),
+        BotCommand("stats", "📊 Stats"),
+        BotCommand("balance", "💰 Balance"),
+        BotCommand("top", "🏆 Top 10"),
 
-        BotCommand(
-            "stats",
-            "👤 My Stats"
-        ),
+        BotCommand("shop", "🛒 Stars Shop"),
+        BotCommand("gifts", "🎁 My Gifts"),
+        BotCommand("give", "🎁 Give Gift"),
 
-        BotCommand(
-            "balance",
-            "💰 My Balance"
-        ),
+        BotCommand("help", "❓ Help"),
+    ]
 
-        BotCommand(
-            "top",
-            "🏆 Top 10"
-        ),
+    await application.bot.set_my_commands(commands)
 
-        BotCommand(
-            "name",
-            "🔎 Character Info"
+    print("✅ Telegram Menu Button updated!")
+
+
+# =========================
+# DAILY
+# =========================
+
+async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    ensure_user(update.effective_user)
+
+    await update.message.reply_text(
+        """
+🎁 <b>Daily Reward</b>
+
+Daily Reward system ကို
+နောက်ပိုင်းမှာ cooldown + reward
+စနစ်အပြည့်ထည့်နိုင်ပါတယ်။
+""",
+        parse_mode="HTML",
+    )
+
+
+# =========================
+# HELP
+# =========================
+
+async def help_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    await update.message.reply_text(
+        """
+❓ <b>Eren Character Bot Help</b>
+
+🎴 <b>Character</b>
+
+<code>/guess Name</code>
+→ Character Catch
+
+Card ကို Reply လုပ်ပြီး:
+
+<code>.n</code>
+→ Character Name ကြည့်ရန်
+
+<code>/card 3356</code>
+→ Card ID ကြည့်ရန်
+
+
+📚 <b>Collection</b>
+
+<code>/collection</code>
+→ Collection
+
+<code>/harem</code>
+→ Harem
+
+<code>/stats</code>
+→ Stats
+
+<code>/balance</code>
+→ Coins
+
+<code>/top</code>
+→ Top 10
+
+
+⭐ <b>Stars Shop</b>
+
+<code>/shop</code>
+→ Telegram Stars နဲ့ Item ဝယ်ရန်
+
+<code>/gifts</code>
+→ ဝယ်ထားတဲ့ Gifts
+
+User message ကို Reply လုပ်ပြီး:
+
+<code>/give small</code>
+
+သို့မဟုတ်:
+
+<code>/give @username small</code>
+
+→ Gift ပို့ရန်
+
+
+🎁 <code>/daily</code>
+→ Daily Reward
+""",
+        parse_mode="HTML",
+    )
+
+
+# =========================
+# INLINE BUTTON HANDLER
+# =========================
+
+async def button_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    query = update.callback_query
+
+    data = query.data
+
+    # =====================
+    # SHOP
+    # =====================
+
+    if data == "shop" or data.startswith("buy:"):
+
+        await shop_button_handler(
+            update,
+            context,
         )
 
-    ])
+        return
+
+    # =====================
+    # GIFTS
+    # =====================
+
+    if data == "gifts":
+
+        await gifts_button_handler(
+            update,
+            context,
+        )
+
+        return
+
+    # =====================
+    # START
+    # =====================
+
+    if data == "start":
+
+        await query.answer()
+
+        ensure_user(query.from_user)
+
+        await query.edit_message_text(
+            """
+🎴 <b>Eren Character Bot</b>
+
+Anime Character တွေကို Catch လုပ်ပြီး
+Collection စုနိုင်ပါတယ်။
+
+🎯 Character ပေါ်လာရင်:
+
+<code>/guess Character Name</code>
+
+Name မသိရင် Card ကို Reply လုပ်ပြီး:
+
+<code>.n</code>
+
+ရိုက်ပါ။
+""",
+            parse_mode="HTML",
+            reply_markup=main_menu(),
+        )
+
+        return
+
+    # =====================
+    # COLLECTION
+    # =====================
+
+    if data == "collection":
+
+        await query.answer()
+
+        await query.message.reply_text(
+            "📚 Collection\n\n<code>/collection</code>",
+            parse_mode="HTML",
+        )
+
+        return
+
+    # =====================
+    # STATS
+    # =====================
+
+    if data == "stats":
+
+        await query.answer()
+
+        await query.message.reply_text(
+            "📊 Stats\n\n<code>/stats</code>",
+            parse_mode="HTML",
+        )
+
+        return
+
+    # =====================
+    # BALANCE
+    # =====================
+
+    if data == "balance":
+
+        await query.answer()
+
+        await query.message.reply_text(
+            "💰 Balance\n\n<code>/balance</code>",
+            parse_mode="HTML",
+        )
+
+        return
+
+    # =====================
+    # TOP
+    # =====================
+
+    if data == "top":
+
+        await query.answer()
+
+        await query.message.reply_text(
+            "🏆 Top 10\n\n<code>/top</code>",
+            parse_mode="HTML",
+        )
+
+        return
+
+    # =====================
+    # DAILY
+    # =====================
+
+    if data == "daily":
+
+        await query.answer()
+
+        await query.message.reply_text(
+            "🎁 Daily Reward\n\n<code>/daily</code>",
+            parse_mode="HTML",
+        )
+
+        return
+
+    # =====================
+    # HELP
+    # =====================
+
+    if data == "help":
+
+        await query.answer()
+
+        await query.message.reply_text(
+            "❓ Help\n\n<code>/help</code>",
+            parse_mode="HTML",
+        )
+
+        return
+
+    await query.answer()
+
+
+# =========================
+# ERROR HANDLER
+# =========================
+
+async def error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    print(
+        "❌ Bot Error:",
+        context.error,
+    )
 
 
 # =========================
@@ -1197,13 +1505,20 @@ async def post_init(application):
 
 def main():
 
-    init_db()
-
     if not BOT_TOKEN:
 
-        print("❌ BOT_TOKEN is missing!")
+        print(
+            "❌ BOT_TOKEN မတွေ့ပါဘူး။"
+        )
 
         return
+
+    # Database
+    init_db()
+
+    print(
+        "🤖 Eren Character Bot is starting..."
+    )
 
     app = (
         Application.builder()
@@ -1212,73 +1527,115 @@ def main():
         .build()
     )
 
-    # Commands
+
+    # =========================
+    # BASIC COMMANDS
+    # =========================
+
     app.add_handler(
-        CommandHandler("start", start)
+        CommandHandler(
+            "start",
+            start,
+        )
     )
 
     app.add_handler(
-        CommandHandler("guess", guess)
+        CommandHandler(
+            "daily",
+            daily,
+        )
     )
 
     app.add_handler(
-        CommandHandler("collection", collection)
+        CommandHandler(
+            "shop",
+            shop,
+        )
     )
 
     app.add_handler(
-        CommandHandler("harem", harem)
+        CommandHandler(
+            "gifts",
+            gifts,
+        )
     )
 
     app.add_handler(
-        CommandHandler("stats", stats)
+        CommandHandler(
+            "give",
+            give,
+        )
     )
 
     app.add_handler(
-        CommandHandler("balance", balance)
+        CommandHandler(
+            "help",
+            help_command,
+        )
+    )
+
+
+    # =========================
+    # ⭐ TELEGRAM STARS
+    # =========================
+
+    app.add_handler(
+        PreCheckoutQueryHandler(
+            precheckout_callback
+        )
     )
 
     app.add_handler(
-        CommandHandler("top", top)
+        MessageHandler(
+            filters.SUCCESSFUL_PAYMENT,
+            successful_payment_callback,
+        )
     )
+
+
+    # =========================
+    # INLINE BUTTONS
+    # =========================
 
     app.add_handler(
-        CommandHandler("name", name_info)
+        CallbackQueryHandler(
+            button_handler
+        )
     )
 
-    # Inline buttons
-    app.add_handler(
-        CallbackQueryHandler(button_handler)
-    )
 
+    # =========================
+    # IMPORTANT
+    # =========================
+    #
+    # ဒီနေရာမှာ လက်ရှိ Character Bot ရဲ့
+    # /guess /collection /harem /stats
+    # /balance /top /name /card
     # .n
-    app.add_handler(
-        MessageHandler(
-            filters.Regex(r"^\.n$"),
-            card_name
-        )
+    # MessageHandler တွေကို
+    # မဖျက်ပါနဲ့။
+    #
+    # အဟောင်း main() ထဲက handler တွေကို
+    # ဒီ main() ထဲမှာ ပြန်ထားရပါမယ်။
+    # =========================
+
+
+    app.add_error_handler(
+        error_handler
     )
 
-    # Group messages
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            count_messages
-        )
-    )
-
-    print(
-        "🤖 Character Catcher Bot is starting..."
-    )
 
     print(
         "✅ Bot is running!"
     )
 
-    app.run_polling()
+    app.run_polling(
+        drop_pending_updates=True
+    )
 
 
 # =========================
-# RUN
+# START
 # =========================
 
 if __name__ == "__main__":
