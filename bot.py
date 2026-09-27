@@ -15,6 +15,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_FILE = "character.db"
 
 
+# =========================
+# DATABASE
+# =========================
+
 def init_db():
     con = sqlite3.connect(DB_FILE)
     cur = con.cursor()
@@ -34,6 +38,10 @@ def init_db():
     con.close()
 
 
+# =========================
+# WAIFU API
+# =========================
+
 def get_waifu():
     try:
         url = "https://api.waifu.im/search"
@@ -46,10 +54,11 @@ def get_waifu():
         response = requests.get(
             url,
             params=params,
-            timeout=15
+            timeout=20
         )
 
         if response.status_code != 200:
+            print("Waifu API status:", response.status_code)
             return None
 
         data = response.json()
@@ -69,6 +78,10 @@ def get_waifu():
         return None
 
 
+# =========================
+# RARITY
+# =========================
+
 def random_rarity():
     chance = random.randint(1, 100)
 
@@ -82,15 +95,21 @@ def random_rarity():
         return "🟡 Legendary"
     else:
         return "🔴 Mythic"
-      async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+
+# =========================
+# START
+# =========================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         "🎴 <b>Character Catcher Bot</b>\n\n"
         "Welcome! 👋\n\n"
-        "🎯 <b>How to play</b>\n"
-        "• /catch — Catch a random character\n"
-        "• /collection — View your collection\n"
-        "• /profile — View your profile\n\n"
+        "🎯 <b>Commands</b>\n"
+        "/catch — Catch a random character\n"
+        "/collection — View your collection\n"
+        "/profile — View your profile\n\n"
         "✨ Good luck!"
     )
 
@@ -100,9 +119,13 @@ def random_rarity():
     )
 
 
+# =========================
+# CATCH
+# =========================
+
 async def catch(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    await update.message.reply_text(
+    waiting = await update.message.reply_text(
         "🎴 <b>A character is appearing...</b>",
         parse_mode="HTML"
     )
@@ -110,7 +133,7 @@ async def catch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     character = get_waifu()
 
     if not character:
-        await update.message.reply_text(
+        await waiting.edit_text(
             "❌ Character API is currently unavailable.\n"
             "Please try again later."
         )
@@ -122,7 +145,7 @@ async def catch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [
             InlineKeyboardButton(
                 "🎴 CATCH",
-                callback_data=f"catch:{rarity}:{character['url']}"
+                callback_data=f"catch|{rarity}|{character['url']}"
             )
         ]
     ]
@@ -130,28 +153,38 @@ async def catch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = (
         "✨ <b>A wild character appeared!</b>\n\n"
         f"💎 Rarity: {rarity}\n\n"
-        "👇 Catch this character!"
+        "👇 Press the button to catch!"
     )
+
+    await waiting.delete()
 
     await update.message.reply_photo(
         photo=character["url"],
         caption=caption,
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
-)
+    )
+
+
+# =========================
+# CATCH BUTTON
+# =========================
+
 async def catch_button(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
 
     query = update.callback_query
-
     await query.answer()
 
-    if not query.data.startswith("catch:"):
+    if not query.data.startswith("catch|"):
         return
 
-    parts = query.data.split(":", 2)
+    parts = query.data.split("|", 2)
+
+    if len(parts) != 3:
+        return
 
     rarity = parts[1]
     image_url = parts[2]
@@ -191,19 +224,27 @@ async def catch_button(
     con.commit()
     con.close()
 
+    owner = f"@{user.username}" if user.username else user.first_name
+
     text = (
         "🎉 <b>Character Caught!</b>\n\n"
         f"👤 <b>{name}</b>\n"
         f"💎 Rarity: {rarity}\n\n"
-        f"👑 Owner: @{username}\n\n"
+        f"👑 Owner: {owner}\n\n"
         "📦 Added to your collection!"
     )
 
     await query.edit_message_caption(
         caption=text,
         parse_mode="HTML"
-  )
-  async def collection(
+    )
+
+
+# =========================
+# COLLECTION
+# =========================
+
+async def collection(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
@@ -249,6 +290,10 @@ async def catch_button(
     )
 
 
+# =========================
+# PROFILE
+# =========================
+
 async def profile(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -272,12 +317,9 @@ async def profile(
 
     con.close()
 
-    username = update.effective_user.username
+    user = update.effective_user
 
-    if username:
-        username = "@" + username
-    else:
-        username = update.effective_user.first_name
+    username = f"@{user.username}" if user.username else user.first_name
 
     text = (
         "👤 <b>Profile</b>\n\n"
@@ -290,7 +332,13 @@ async def profile(
         text,
         parse_mode="HTML"
     )
-  def main():
+
+
+# =========================
+# MAIN
+# =========================
+
+def main():
 
     if not BOT_TOKEN:
         print("❌ BOT_TOKEN environment variable is missing!")
