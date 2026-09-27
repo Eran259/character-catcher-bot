@@ -3,7 +3,7 @@ import sqlite3
 import random
 import requests
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -24,6 +24,7 @@ MESSAGE_LIMIT = 20
 # =========================
 
 def init_db():
+
     con = sqlite3.connect(DB_FILE)
     cur = con.cursor()
 
@@ -62,6 +63,13 @@ def init_db():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS group_stats (
+            chat_id INTEGER PRIMARY KEY,
+            messages INTEGER DEFAULT 0
+        )
+    """)
+
     con.commit()
     con.close()
 
@@ -71,7 +79,9 @@ def init_db():
 # =========================
 
 def get_character():
+
     try:
+
         url = "https://graphql.anilist.co"
 
         query = """
@@ -111,30 +121,47 @@ def get_character():
 
         data = response.json()
 
-        characters = data["data"]["Page"]["characters"]
+        characters = (
+            data.get("data", {})
+            .get("Page", {})
+            .get("characters", [])
+        )
 
         if not characters:
             return None
 
         character = random.choice(characters)
 
+        name = character.get("name", {}).get("full")
+        image_url = character.get("image", {}).get("large")
+
+        if not name or not image_url:
+            return None
+
         series = "Unknown Anime"
 
         media = character.get("media", {}).get("nodes", [])
 
         if media:
+
             title = media[0].get("title", {})
-            series = title.get("romaji") or "Unknown Anime"
+
+            series = (
+                title.get("romaji")
+                or "Unknown Anime"
+            )
 
         return {
             "id": character["id"],
-            "name": character["name"]["full"],
+            "name": name,
             "series": series,
-            "image_url": character["image"]["large"],
+            "image_url": image_url
         }
 
     except Exception as e:
+
         print("Character API error:", e)
+
         return None
 
 
@@ -163,7 +190,7 @@ def random_rarity():
 
 
 # =========================
-# USER
+# REGISTER USER
 # =========================
 
 def register_user(user):
@@ -173,7 +200,13 @@ def register_user(user):
 
     cur.execute("""
         INSERT OR IGNORE INTO users
-        (user_id, username, coins, messages, caught)
+        (
+            user_id,
+            username,
+            coins,
+            messages,
+            caught
+        )
         VALUES (?, ?, 100, 0, 0)
     """, (
         user.id,
@@ -240,6 +273,9 @@ async def start(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
+    if not update.message:
+        return
+
     user = update.effective_user
 
     register_user(user)
@@ -252,17 +288,21 @@ async def start(
 
     text = (
         "🎮 <b>Character Catcher Bot မှ ကြိုဆိုပါတယ်!</b>\n\n"
+
         "👤 <b>User Info:</b>\n"
         f"📛 Name: {user.full_name}\n"
         f"🔗 Username: {username}\n"
         f"🆔 Chat ID: {user.id}\n\n"
+
         "🎴 <b>Card တွေ ကောက်ယူနည်း:</b>\n"
         "• Group ထဲမှာ စာတွေ ရေးပါ\n"
-        "• Character Card တွေ ကျလာပါလိမ့်မယ်\n"
-        "• /guess &lt;name&gt; ရိုက်ပြီး ကောက်ယူပါ\n"
-        "• မှန်ရင် Card က သင့်ဆီ ရောက်သွားပါမယ်\n"
-        "• Coins လည်း ရပါမယ်\n\n"
-        "💬 <b>Group ထဲမှာ စာရေးပြီး ဇာတ်ကောင် ဖမ်းပါ!</b>"
+        "• စာ 20 ကြောင်းပြည့်ရင် Card ကျပါမယ်\n"
+        "• Card ကို Reply လုပ်ပြီး <code>.n</code> ရိုက်ပါ\n"
+        "• Character Name ကို Copy လုပ်ပါ\n"
+        "• /guess &lt;name&gt; နဲ့ Card ဖမ်းပါ\n"
+        "• မှန်ရင် Card နဲ့ Coins ရပါမယ်\n\n"
+
+        "💬 <b>Group ထဲမှာ စာရေးပြီး Character ဖမ်းပါ!</b>"
     )
 
     await update.message.reply_text(
@@ -273,7 +313,7 @@ async def start(
 
 
 # =========================
-# MESSAGE COUNTER
+# GROUP MESSAGE COUNTER
 # =========================
 
 async def count_messages(
@@ -284,46 +324,57 @@ async def count_messages(
     if not update.message:
         return
 
-    if not update.effective_chat:
-        return
-
-    if update.effective_chat.type not in (
-        "group",
-        "supergroup"
-    ):
-        return
-
-    if not update.effective_user:
-        return
-
+    chat = update.effective_chat
     user = update.effective_user
+
+    if not chat:
+        return
+
+    if chat.type not in ("group", "supergroup"):
+        return
+
+    if not user:
+        return
 
     if user.is_bot:
         return
 
     register_user(user)
 
-    chat_id = update.effective_chat.id
+    chat_id = chat.id
 
     con = sqlite3.connect(DB_FILE)
     cur = con.cursor()
 
+    # User message count
     cur.execute("""
         UPDATE users
         SET messages = messages + 1
         WHERE user_id = ?
     """, (user.id,))
 
-    con.commit()
+    # Group message counter
+    cur.execute("""
+        INSERT OR IGNORE INTO group_stats
+        (chat_id, messages)
+        VALUES (?, 0)
+    """, (chat_id,))
+
+    cur.execute("""
+        UPDATE group_stats
+        SET messages = messages + 1
+        WHERE chat_id = ?
+    """, (chat_id,))
 
     cur.execute("""
         SELECT messages
-        FROM users
-        WHERE user_id = ?
-    """, (user.id,))
+        FROM group_stats
+        WHERE chat_id = ?
+    """, (chat_id,))
 
     row = cur.fetchone()
 
+    con.commit()
     con.close()
 
     if not row:
@@ -331,9 +382,11 @@ async def count_messages(
 
     total_messages = row[0]
 
+    # Every 20 group messages
     if total_messages % MESSAGE_LIMIT != 0:
         return
 
+    # Don't spawn if another card exists
     con = sqlite3.connect(DB_FILE)
     cur = con.cursor()
 
@@ -350,12 +403,16 @@ async def count_messages(
     if existing:
         return
 
+    # Get Character
     character = get_character()
 
     if not character:
-        await update.message.reply_text(
-            "❌ Character API is currently unavailable."
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="❌ Character API မရနိုင်သေးပါဘူး။"
         )
+
         return
 
     rarity, reward = random_rarity()
@@ -393,15 +450,42 @@ async def count_messages(
         f"💎 Rarity: {rarity}\n"
         f"📺 Anime: <b>{character['series']}</b>\n\n"
         "❓ <b>Who is this character?</b>\n\n"
-        "💬 Use:\n"
+        "💡 Name သိချင်ရင် ဒီ Card ကို Reply လုပ်ပြီး "
+        "<code>.n</code> ရိုက်ပါ!\n\n"
+        "🎯 Guess:\n"
         "<code>/guess &lt;name&gt;</code>"
     )
 
-    await update.message.reply_photo(
-        photo=character["image_url"],
-        caption=text,
-        parse_mode="HTML"
-)
+    # IMPORTANT:
+    # Send as a NEW message.
+    # Do NOT reply to the user's message.
+    try:
+
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=character["image_url"],
+            caption=text,
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+
+        print("Failed to send card:", e)
+
+        try:
+
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode="HTML"
+            )
+
+        except Exception as e2:
+
+            print(
+                "Failed to send card text:",
+                e2
+        )
 
 # =========================
 # GUESS
@@ -422,7 +506,7 @@ async def guess(
 
     if not context.args:
         await update.message.reply_text(
-            "❓ Character name ထည့်ပေးပါ။\n\n"
+            "❓ Character Name ထည့်ပေးပါ။\n\n"
             "ဥပမာ:\n"
             "/guess Gojo Satoru"
         )
@@ -434,7 +518,8 @@ async def guess(
     cur = con.cursor()
 
     cur.execute("""
-        SELECT character_id, name, series, image_url, rarity, reward
+        SELECT character_id, name, series,
+               image_url, rarity, reward
         FROM active_cards
         WHERE chat_id = ?
     """, (chat.id,))
@@ -454,16 +539,22 @@ async def guess(
     real_name = name.lower()
     first_name = name.split()[0].lower()
 
-    if guess_name != real_name and guess_name != first_name:
+    # Full name or first name
+    if (
+        guess_name != real_name
+        and guess_name != first_name
+    ):
+
         con.close()
 
         await update.message.reply_text(
             "❌ မမှန်သေးပါဘူး!\n"
             "ဆက်ပြီး Guess လုပ်ကြည့်ပါ 🎴"
         )
+
         return
 
-    # Add card to collection
+    # Save collection
     cur.execute("""
         INSERT INTO collection
         (
@@ -486,7 +577,7 @@ async def guess(
         reward
     ))
 
-    # Add coins
+    # Give coins
     cur.execute("""
         UPDATE users
         SET coins = coins + ?,
@@ -508,12 +599,69 @@ async def guess(
 
     await update.message.reply_text(
         "🎉 <b>CARD CAUGHT!</b>\n\n"
-        f"👤 Character: <b>{name}</b>\n"
+        f"🎴 Character: <b>{name}</b>\n"
         f"📺 Anime: <b>{series}</b>\n"
         f"💎 Rarity: {rarity}\n"
         f"💰 Reward: +{reward} Coins\n\n"
-        f"🎴 <b>{user.first_name}</b> က Card ကို ဖမ်းလိုက်ပါပြီ!"
-        ,
+        f"👤 <b>{user.first_name}</b> က Card ကို ဖမ်းလိုက်ပါပြီ!",
+        parse_mode="HTML"
+    )
+
+
+# =========================
+# .N - CARD NAME
+# =========================
+
+async def card_name(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not update.message:
+        return
+
+    reply = update.message.reply_to_message
+
+    if not reply:
+        await update.message.reply_text(
+            "❗ Character Card message ကို Reply လုပ်ပြီး `.n` ရိုက်ပါ။"
+        )
+        return
+
+    chat = update.effective_chat
+
+    if not chat:
+        return
+
+    chat_id = chat.id
+
+    con = sqlite3.connect(DB_FILE)
+    cur = con.cursor()
+
+    cur.execute("""
+        SELECT name
+        FROM active_cards
+        WHERE chat_id = ?
+    """, (chat_id,))
+
+    row = cur.fetchone()
+
+    con.close()
+
+    if not row:
+        await update.message.reply_text(
+            "❌ ဒီ Card က မရှိတော့ပါဘူး။"
+        )
+        return
+
+    character_name = row[0]
+
+    await update.message.reply_text(
+        "🎴 <b>Character Name</b>\n\n"
+        f"<code>{character_name}</code>\n\n"
+        "👆 Name ကို Copy လုပ်ပြီး\n"
+        "<code>/guess " + character_name + "</code>\n"
+        "နဲ့ Card ဖမ်းနိုင်ပါတယ်။",
         parse_mode="HTML"
     )
 
@@ -547,17 +695,20 @@ async def collection(
     con.close()
 
     if not cards:
+
         await update.message.reply_text(
-            "🎒 <b>Your Collection</b>\n\n"
+            "🎒 <b>YOUR COLLECTION</b>\n\n"
             "📭 Card မရှိသေးပါဘူး။\n"
             "Group ထဲမှာ စာရေးပြီး Card ဖမ်းပါ 🎴",
             parse_mode="HTML"
         )
+
         return
 
     text = "🎒 <b>YOUR COLLECTION</b>\n\n"
 
     for i, (name, series, rarity) in enumerate(cards, 1):
+
         text += (
             f"{i}. {rarity} <b>{name}</b>\n"
             f"   📺 {series}\n\n"
@@ -580,6 +731,8 @@ async def harem(
 
     user = update.effective_user
 
+    register_user(user)
+
     con = sqlite3.connect(DB_FILE)
     cur = con.cursor()
 
@@ -595,18 +748,22 @@ async def harem(
     con.close()
 
     if not cards:
+
         await update.message.reply_text(
-            "💖 <b>Your Harem</b>\n\n"
-            "Empty ဖြစ်နေပါသေးတယ် 😅\n"
-            "Character တွေကို ဖမ်းယူပါ!",
+            "💖 <b>YOUR HAREM</b>\n\n"
+            "📭 Empty ဖြစ်နေပါသေးတယ် 😅",
             parse_mode="HTML"
         )
+
         return
 
     text = "💖 <b>YOUR HAREM</b>\n\n"
 
     for i, (name, rarity) in enumerate(cards, 1):
-        text += f"{i}. {rarity} <b>{name}</b>\n"
+
+        text += (
+            f"{i}. {rarity} <b>{name}</b>\n"
+        )
 
     await update.message.reply_text(
         text,
@@ -714,19 +871,19 @@ async def top(
     con.close()
 
     if not rows:
+
         await update.message.reply_text(
             "🏆 Leaderboard မရှိသေးပါဘူး။"
         )
+
         return
 
     text = "🏆 <b>TOP 10 PLAYERS</b>\n\n"
 
     for i, (username, coins, caught) in enumerate(rows, 1):
 
-        display_name = username or "Unknown"
-
         text += (
-            f"{i}. <b>{display_name}</b>\n"
+            f"{i}. <b>{username or 'Unknown'}</b>\n"
             f"   🪙 {coins} Coins | 🎴 {caught} Cards\n\n"
         )
 
@@ -737,7 +894,7 @@ async def top(
 
 
 # =========================
-# CHARACTER INFO
+# CHARACTER NAME INFO
 # =========================
 
 async def name_info(
@@ -748,14 +905,18 @@ async def name_info(
     user = update.effective_user
 
     if not context.args:
+
         await update.message.reply_text(
-            "❓ Character name ထည့်ပေးပါ။\n\n"
+            "❓ Character Name ထည့်ပေးပါ။\n\n"
             "ဥပမာ:\n"
             "/name Gojo"
         )
+
         return
 
-    search_name = " ".join(context.args).strip().lower()
+    search_name = " ".join(
+        context.args
+    ).strip().lower()
 
     con = sqlite3.connect(DB_FILE)
     cur = con.cursor()
@@ -777,9 +938,11 @@ async def name_info(
     con.close()
 
     if not row:
+
         await update.message.reply_text(
             "❌ ဒီ Character ကို Collection ထဲမှာ မတွေ့ပါဘူး။"
         )
+
         return
 
     name, series, image_url, rarity = row
@@ -791,12 +954,15 @@ async def name_info(
     )
 
     try:
+
         await update.message.reply_photo(
             photo=image_url,
             caption=text,
             parse_mode="HTML"
         )
+
     except Exception:
+
         await update.message.reply_text(
             text,
             parse_mode="HTML"
@@ -838,14 +1004,18 @@ async def button_handler(
         con.close()
 
         if not cards:
+
             text = (
                 "🎒 <b>YOUR COLLECTION</b>\n\n"
                 "📭 Card မရှိသေးပါဘူး။"
             )
+
         else:
+
             text = "🎒 <b>YOUR COLLECTION</b>\n\n"
 
             for i, (name, series, rarity) in enumerate(cards, 1):
+
                 text += (
                     f"{i}. {rarity} <b>{name}</b>\n"
                     f"   📺 {series}\n\n"
@@ -855,6 +1025,7 @@ async def button_handler(
             text,
             parse_mode="HTML"
         )
+
 
     elif query.data == "stats":
 
@@ -872,6 +1043,7 @@ async def button_handler(
         con.close()
 
         if row:
+
             coins, messages, caught = row
 
             text = (
@@ -880,13 +1052,16 @@ async def button_handler(
                 f"💬 Messages: <b>{messages}</b>\n"
                 f"🎴 Cards Caught: <b>{caught}</b>"
             )
+
         else:
+
             text = "❌ User data မတွေ့ပါဘူး။"
 
         await query.edit_message_text(
             text,
             parse_mode="HTML"
         )
+
 
     elif query.data == "balance":
 
@@ -911,6 +1086,7 @@ async def button_handler(
             parse_mode="HTML"
         )
 
+
     elif query.data == "top":
 
         con = sqlite3.connect(DB_FILE)
@@ -930,6 +1106,7 @@ async def button_handler(
         text = "🏆 <b>TOP 10 PLAYERS</b>\n\n"
 
         for i, (username, coins, caught) in enumerate(rows, 1):
+
             text += (
                 f"{i}. <b>{username or 'Unknown'}</b>\n"
                 f"   🪙 {coins} | 🎴 {caught}\n\n"
@@ -940,24 +1117,78 @@ async def button_handler(
             parse_mode="HTML"
         )
 
+
     elif query.data == "commands":
 
         text = (
             "📖 <b>COMMANDS</b>\n\n"
-            "/start — Start Bot\n"
-            "/guess &lt;name&gt; — Catch Card\n"
-            "/name &lt;name&gt; — Character Info\n"
-            "/collection — My Cards\n"
-            "/harem — My Harem\n"
-            "/stats — My Stats\n"
-            "/balance — Coins\n"
-            "/top — Top 10 Players"
+            "/start — 🎮 Start Bot\n"
+            "/guess &lt;name&gt; — 🎯 Catch Card\n"
+            "/name &lt;name&gt; — 🔎 Character Info\n"
+            "/collection — 🎴 My Collection\n"
+            "/harem — 💖 My Harem\n"
+            "/stats — 👤 My Stats\n"
+            "/balance — 💰 Coins\n"
+            "/top — 🏆 Top 10\n\n"
+            "💡 Card Name သိချင်ရင်\n"
+            "Card ကို Reply → <code>.n</code>"
         )
 
         await query.edit_message_text(
             text,
             parse_mode="HTML"
         )
+
+
+# =========================
+# TELEGRAM MENU
+# =========================
+
+async def post_init(application):
+
+    await application.bot.set_my_commands([
+
+        BotCommand(
+            "start",
+            "🎮 Start Bot"
+        ),
+
+        BotCommand(
+            "guess",
+            "🎯 Catch a Card"
+        ),
+
+        BotCommand(
+            "collection",
+            "🎴 My Collection"
+        ),
+
+        BotCommand(
+            "harem",
+            "💖 My Harem"
+        ),
+
+        BotCommand(
+            "stats",
+            "👤 My Stats"
+        ),
+
+        BotCommand(
+            "balance",
+            "💰 My Balance"
+        ),
+
+        BotCommand(
+            "top",
+            "🏆 Top 10"
+        ),
+
+        BotCommand(
+            "name",
+            "🔎 Character Info"
+        )
+
+    ])
 
 
 # =========================
@@ -969,11 +1200,19 @@ def main():
     init_db()
 
     if not BOT_TOKEN:
+
         print("❌ BOT_TOKEN is missing!")
+
         return
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
+    # Commands
     app.add_handler(
         CommandHandler("start", start)
     )
@@ -1006,10 +1245,20 @@ def main():
         CommandHandler("name", name_info)
     )
 
+    # Inline buttons
     app.add_handler(
         CallbackQueryHandler(button_handler)
     )
 
+    # .n
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(r"^\.n$"),
+            card_name
+        )
+    )
+
+    # Group messages
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
@@ -1017,16 +1266,20 @@ def main():
         )
     )
 
-    print("🤖 Character Catcher Bot is starting...")
-    print("✅ Bot is running!")
+    print(
+        "🤖 Character Catcher Bot is starting..."
+    )
+
+    print(
+        "✅ Bot is running!"
+    )
 
     app.run_polling()
 
 
 # =========================
-# START BOT
+# RUN
 # =========================
 
 if __name__ == "__main__":
     main()
-    
